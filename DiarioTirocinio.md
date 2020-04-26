@@ -273,10 +273,338 @@ Il primo operatore permette, data una hexmesh, di selezionare un livello, cioè 
 
 L'operatore opposto invece permette sempre di selezionare un livello, ma, anziché togliere il "piano" di esaedri, si va ad aggiungere un "foglio" di esaedri e quindi si va a "pompare" una hexmesh aggiungendo un livello.
 
-### Problemi da risolvere
+### Approccio
 
-**Selezione del livello:**
-Dobbiamo selezionare un livello, sia nel caso dell'eliminazione di questo, sia nel caso dell'eliminazione, sia nel caso del pompaggio.
+Come prima cosa si dovrà selezionare un livello, quindi andremo a selezionare un esaedro e di questo due coppie di facce opposte in quando possiamo selezionare due livelli per ogni esaedro.
 
-Inizialmente per la selezione del livello era stato preso in considerazione
+La selezione avviene per adiacenza, quindi, data ogni faccia che definisce il livello, si va a vedere l'altro esaedro adiacente a quella faccia e si tagga, per poi proseguire con l'esaedro appena trovato e trovare gli altri esaedri adiacenti con le stesse modalità.
+
+Una volta riusciti a selezionare il livello si andrà a "pompare" o eliminare il livello.
+
+Per pompare il livello si può agire in due maniere:
+
+- Inserire effettivamente un foglio di esaedri tra il livello selezionato e la porzione di mesh sopra o sotto questo livello
+- Andare a "spezzare" il livello selezionato in due livelli, in modo da aggiungere un nuovo livello "sdoppiando quello già esistente"
+
+Per eliminare quel livello invece si deve andare a "ricongiungere" poi le due porzioni di mesh sopra e sotto quel livello, idealmente andando a far combaciare le due faccie opposte a contatto con l'esterno del livello e poi eliminando una delle due.
+
+### Risolviamo prima il problema con surface mesh
+
+#### Picking
+
+L'approccio ed il ragionamento sono i medesimi, ma anziché andare a lavorare di faces andremo a lavorare di edges.
+
+Iniziamo con la selezione di un livello di mesh utilizzando lo strumento di picking in modo da selezionare un edge.
+
+```cpp
+//esempio cinolib modificato per pickare edges
+
+Profiler profiler;
+
+gui.callback_mouse_press = [&](GLcanvas *c, QMouseEvent *e)
+{
+  if (e->modifiers() == Qt::ControlModifier)
+  {
+    vec3d p;
+    vec2i click(e->x(), e->y());
+    if (c->unproject(click, p)) // transform click in a 3d point
+    {
+      profiler.push("Pick Edge");
+      uint eid = m.pick_edge(p);
+      profiler.pop();
+      m.edge_data(eid).color = Color::RED();
+      m.updateGL();
+      c->updateGL();
+    }
+  }
+};
+```
+
+In questo frangente andiamo ad attribuire un colore all'edge pickato, piuttosto che un tag, in questo modo possiamo andare a selezionare tutto un livello di edges.
+
+#### Selezione del livello
+
+##### Approccio 1
+
+Dopo aver individuato un edge possiamo andare a selezionare tutti gli edges paralleli a quello selezionato con la funzione ```.edge_parallel_chain(uint eid)``` e successivamente andare a selezionare tutti i poligoni tra adiacenti a questi edge.
+
+```cpp
+for(uint e : m.edge_parallel_chain(eid)) {
+  m.edge_data(e).color = Color::RED();
+
+  for(auto p : m.adj_e2p(e))
+    m.poly_data(p).color = Color::PASTEL_CYAN();
+}
+
+m.show_poly_color();
+```
+
+Con il seguente risultato:
+
+![livello_polyspikes](./livello_polyspikes.png)
+
+##### Approccio 2
+
+In alternativa si poteva procedere nel seguente modo:
+Dopo aver selezionato un edge si sarebbe andato selezionare i due quad adiacenti ad esso, successivamente si sarebbe potuto "camminare" per edge paralleli tramite la funzione ```.edge_opposite_to(uint pid, uint eid)```, prima da un lato, poi dall'altro, fino alla "fine" della mesh oppure fino a ritrovare lo stesso edge da cui si è partiti (nel secondo caso non servirà andare a percorrere la seconda direzione di edge paralleli).
+Allo stesso modo, dopo aver selezionato tutti gli edge paralleli (o durante), andiamo a taggare tutti i quad per selezionare il livello.
+
+```cpp
+uint eid_chain, pid, pid_prev;
+
+//PRIMO GIRO
+
+//primo quad
+pid_prev= m.adj_e2p(eid)[0];
+m.poly_data(pid_prev).color = Color::PASTEL_CYAN();
+//primo edge
+eid_chain = m.edge_opposite_to(pid_prev, eid);
+m.edge_data(eid).color = Color::RED();
+
+do{
+  //taggo l'edge
+  m.edge_data(eid_chain).color = Color::RED();
+
+  //scelgo il quad non ancora taggato
+  pid = m.adj_e2p(eid_chain)[0];
+  if (pid == pid_prev && m.adj_e2p(eid_chain).size() == 2)
+    pid = m.adj_e2p(eid_chain)[1];
+  else
+    break; //caso in cui la mesh non sia chiusa
+
+  //taggo il quad
+  m.poly_data(pid).color = Color::PASTEL_CYAN();
+  //vado avanti
+  pid = pid_prev;
+  eid_chain = m.edge_opposite_to(pid, eid_chain);
+
+}while(eid != eid_chain);
+
+//caso mesh non chiusa: dobbiamo andare a taggare l'altro verso rispetto alla partenza
+if(eid != eid_chain) {
+
+  //primo quad altro giro
+  pid_prev = m.adj_e2p(eid)[1];
+  m.poly_data(pid_prev).color = Color::PASTEL_CYAN();
+  //primo adge altro giro
+  eid_chain = m.edge_opposite_to(pid_prev, eid);
+
+  do{
+    //taggo l'edge
+    m.edge_data(eid_chain).color = Color::RED();
+
+    //scelgo il quad non ancora taggato
+    pid = m.adj_e2p(eid_chain)[0];
+    if (pid == pid_prev && m.adj_e2p(eid_chain).size() == 2)
+      pid = m.adj_e2p(eid_chain)[1];
+    else
+      break; //caso in cui la mesh non sia chiusa
+
+    //taggo il quad
+    m.poly_data(pid).color = Color::PASTEL_CYAN();
+    //vado avanti
+    pid = pid_prev;
+    eid_chain = m.edge_opposite_to(pid, eid_chain);
+
+  }while(eid != eid_chain);
+}
+
+m.show_poly_color();
+```
+
+==QUESTA ROBA NON FUNZIONA==
+
+##### Approccio finale
+
+Per risolvere sempre il problema di efficienza per la quale andiamo a ritaggare poligoni ed edge già taggati, possiamo servircii di una struttura dati quale il set, che in automatico andrà a controllare se quel quad è già stato selezionato con una complessità computazionale di O(log n) e nel caso sia già presente non lo inserirà nuovamente.
+Dopo aver inserito gli indici di tutti i quad interessati nel set andiamo a colorarli tutti in modo da visualizzare il livello interessato.
+
+```cpp
+std::vector<uint> edge_chain = m.edge_parallel_chain(eid);
+std::set<uint> poly_chain;
+
+for(uint e : edge_chain) {
+  for(auto p : m.adj_e2p(e))
+    poly_chain.insert(p);
+
+  m.edge_data(e).color = Color::RED();
+}
+
+for(auto p : poly_chain)
+  m.poly_data(p).color = Color::PASTEL_CYAN();
+
+m.show_poly_color();
+```
+
+> Successivamente ho scoperto che è più comodo utilizzare un vettore anziché un set, sebbene sia l'approccio migliore, a casusa di funzioni che andranno utilizzate successivamente.
+>
+> Il codice quindi diventa:
+>
+> ```cpp
+> std::vector<uint> edge_chain = m.edge_parallel_chain(eid);
+> std::vector<uint> poly_chain;
+> 
+> for(uint e : edge_chain) {
+> 	for(auto p : m.adj_e2p(e))
+>     if(DOES_NOT_CONTAIN_VEC(poly_chain,p)) /* COSÌ UTILIZZIAMO LA LISTA COME UN SET*/
+>       poly_chain.push_back(p);
+> }
+> ```
+>
+> È stata rimossa anche l'attribuzione dei colori, in quanto l'importante è che i poligoni siano salvati da qualche parte, non è necessario che siano colorati, anche perché tra poco verranno rimossi.
+
+
+
+#### Creazione dei nuovi vertici
+
+Per al creazione dei sub-quad prima dobbiamo andare a creare i nuovi vertici che compongono questi quad.
+
+Per la creazione di questi andremo a prendere la catena di edge che abbiamo salvato in precedenza e creeremo un vertice al centro di ognuno di questi edge (playsolder).
+
+```cpp
+std::map<uint, uint> new_e2v;
+
+for(uint eid : edge_chain) {
+	//creo un nuovo vertice
+    double x = (m.edge_verts(eid)[0].x() + m.edge_verts(eid)[1].x()) / 2;
+    double y = (m.edge_verts(eid)[0].y() + m.edge_verts(eid)[1].y()) / 2;
+    double z = (m.edge_verts(eid)[0].z() + m.edge_verts(eid)[1].z()) / 2;
+    vec3d new_vert(x, y, z);
+
+    //aggiungo il nuovo vertice alla mesh e lo associo all'edge
+    uint new_vid = m.vert_add(new_vert);
+    new_e2v.insert(std::pair<uint, uint> (eid, new_vid));
+}
+```
+
+Per salvare i nuovi vertici abbiamo utilizzato una mappa, in questo ogni vertice è associato ad ogni edge che spezza.
+
+
+
+#### Creazione dei nuovi quad ed eliminazione dei vecchi
+
+Per questo passaggio ci serviamo della catena di quad creata al primo passaggio.
+
+Per ogni quad andiamo a capire in che verso dobbiamo tagliarlo, per fare ciò prendiamo il primo vertice (poteva essere uno qualsiasi dato che non sappiamo poi quale sia il primo vertice salvato) e i due edge ad esso incidenti.
+
+Controlliamo quale dei due edge appartenga alla catena di edge calcolata precedentemente, di conseguenza capiamo anche il verso secondo la quale dobbiamo dividere in due il quad.
+
+```cpp
+for(auto pid : poly_chain) {
+
+    if(CONTAINS_VEC(edge_chain, m.edge_id(m.poly_vert_id(pid,0), m.poly_vert_id(pid,1)))) {
+
+        m.poly_add({m.poly_vert_id(pid,0),
+                    new_e2v.at(m.edge_id(m.poly_vert_id(pid,0), m.poly_vert_id(pid,1))),
+                    new_e2v.at(m.edge_id(m.poly_vert_id(pid,2), m.poly_vert_id(pid,3))),
+                    m.poly_vert_id(pid,3)});
+
+        m.poly_add({m.poly_vert_id(pid,1),
+                    m.poly_vert_id(pid,2),
+                    new_e2v.at(m.edge_id(m.poly_vert_id(pid,2), m.poly_vert_id(pid,3))),
+                    new_e2v.at(m.edge_id(m.poly_vert_id(pid,0), m.poly_vert_id(pid,1)))});
+
+    } else {
+        m.poly_add({m.poly_vert_id(pid,3),
+                    new_e2v.at(m.edge_id(m.poly_vert_id(pid,0), m.poly_vert_id(pid,3))),
+                    new_e2v.at(m.edge_id(m.poly_vert_id(pid,2), m.poly_vert_id(pid,1))),
+                    m.poly_vert_id(pid,2)});
+
+        m.poly_add({m.poly_vert_id(pid,0),
+                    m.poly_vert_id(pid,1),
+                    new_e2v.at(m.edge_id(m.poly_vert_id(pid,1), m.poly_vert_id(pid,2))),
+                    new_e2v.at(m.edge_id(m.poly_vert_id(pid,0), m.poly_vert_id(pid,3)))});
+    }
+
+}
+
+m.polys_remove(poly_chain);
+```
+
+I vertici della subquad vanno sempre aggiunti in ordine antiorario, poiché al contrario la normale verrebbe calcolata dall'altro lato e il poligono renderizzato al contrario.
+
+Dopo aver aggiunto tutti i subquad possiamo andare a rimuovere quelli vecchi.
+
+
+
+#### Risultato finale
+
+Mettendo insieme tutti questi approcci abbiamo questo risultato:
+
+```cpp
+gui.callback_mouse_press = [&](GLcanvas *c, QMouseEvent *e)
+{
+    if (e->modifiers() == Qt::ControlModifier)
+    {
+        vec3d p;
+        vec2i click(e->x(), e->y());
+        if (c->unproject(click, p)) // transform click in a 3d point
+        {
+            profiler.push("Pick Edge");
+            uint pick_eid = m.pick_edge(p);
+            profiler.pop();
+
+            //catena di edge
+            std::vector<uint> edge_chain = m.edge_parallel_chain(pick_eid);
+
+            //catena di poligoni e mappa nuovi vertici
+            std::vector<uint> poly_chain;
+            std::map<uint, uint> new_e2v;
+
+            for(uint eid : edge_chain) {
+
+                //catena quad
+                for(auto p : m.adj_e2p(eid))
+                    if(DOES_NOT_CONTAIN_VEC(poly_chain,p))
+                        poly_chain.push_back(p);
+
+                //nuovi vertici
+                double x = (m.edge_verts(eid)[0].x() + m.edge_verts(eid)[1].x()) / 2;
+                double y = (m.edge_verts(eid)[0].y() + m.edge_verts(eid)[1].y()) / 2;
+                double z = (m.edge_verts(eid)[0].z() + m.edge_verts(eid)[1].z()) / 2;
+                vec3d new_vert(x, y, z);
+
+                //aggiungo il nuovo vertice alla mesh e lo associo all'edge
+                uint new_vid = m.vert_add(new_vert);
+                new_e2v.insert(std::pair<uint, uint> (eid, new_vid));
+            }
+
+            //creazione dei subquad
+            for(auto pid : poly_chain) {
+
+                //con questo if capiamo il verso in cui tagliare il quad
+                if(CONTAINS_VEC(edge_chain, m.edge_id(m.poly_vert_id(pid,0), m.poly_vert_id(pid,1)))) {
+                    m.poly_add({m.poly_vert_id(pid,0),
+                                new_e2v.at(m.edge_id(m.poly_vert_id(pid,0), m.poly_vert_id(pid,1))),
+                                new_e2v.at(m.edge_id(m.poly_vert_id(pid,2), m.poly_vert_id(pid,3))),
+                                m.poly_vert_id(pid,3)});
+                    m.poly_add({m.poly_vert_id(pid,1),
+                                m.poly_vert_id(pid,2),
+                                new_e2v.at(m.edge_id(m.poly_vert_id(pid,2), m.poly_vert_id(pid,3))),
+                                new_e2v.at(m.edge_id(m.poly_vert_id(pid,0), m.poly_vert_id(pid,1)))});
+                } else {
+                    m.poly_add({m.poly_vert_id(pid,3),
+                                new_e2v.at(m.edge_id(m.poly_vert_id(pid,0), m.poly_vert_id(pid,3))),
+                                new_e2v.at(m.edge_id(m.poly_vert_id(pid,2), m.poly_vert_id(pid,1))),
+                                m.poly_vert_id(pid,2)});
+                    m.poly_add({m.poly_vert_id(pid,0),
+                                m.poly_vert_id(pid,1),
+                                new_e2v.at(m.edge_id(m.poly_vert_id(pid,1), m.poly_vert_id(pid,2))),
+                                new_e2v.at(m.edge_id(m.poly_vert_id(pid,0), m.poly_vert_id(pid,3)))});
+                }
+            }
+
+            //rimozione poligoni
+            m.polys_remove(poly_chain);
+
+            m.updateGL();
+            c->updateGL();
+        }
+    }
+};
+```
+
+Risultato grafico:
+
+![Quad generati dal livello selezonato prima](subquad_polyspikes.png)
 
